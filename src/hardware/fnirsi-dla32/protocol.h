@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <math.h>
 #if defined(__SSE2__) && !defined(DLA_DISABLE_SIMD)
 #include <emmintrin.h>
 #endif
@@ -96,7 +97,39 @@ static inline void dla_setup_configure(uint8_t *out,
 	dla_packet(out, body, sizeof(body));
 }
 
-/* DLA-32 physical PWM0/PWM1/PWM2/PWM3. The factory UI restricts duty to integer 1..99%.
+/* A single comparator threshold, in signed hundredths of a volt. The pair
+ * represents the same switching level, not configurable hysteresis. */
+static inline int dla_threshold_from_volts(double low, double high, int16_t *value)
+{
+	double scaled, rounded;
+
+	if (!value || !isfinite(low) || !isfinite(high) || low != high ||
+			low < -5.0 || low > 5.0)
+		return -1;
+	scaled = low * 100.0;
+	rounded = round(scaled);
+	if (fabs(scaled - rounded) > 0.000001)
+		return -1;
+	*value = (int16_t)rounded;
+	return 0;
+}
+
+static inline uint8_t dla_threshold_preset(int16_t value)
+{
+	switch (value) {
+	case 250: return 1;
+	case 160: return 2;
+	case 150: return 3;
+	case 120: return 4;
+	case 90: return 5;
+	case 70: return 6;
+	case 60: return 7;
+	default: return 0; /* Custom, including negative values. */
+	}
+}
+
+/* DLA-32 physical PWM0/PWM1/PWM2/PWM3. 0/100% command constant LOW/HIGH.
+ * Intermediate pulse widths have device timing quantization.
  * Disabled electrical state (driven low or high impedance) needs measurement.
  */
 static inline int dla_pwm(uint8_t *out, unsigned int channel,
@@ -105,7 +138,7 @@ static inline int dla_pwm(uint8_t *out, unsigned int channel,
 	uint8_t body[12] = {0x17, 0x0b, 0x00};
 
 	if (channel >= 4 || (enabled &&
-		(!frequency || frequency > 20000000 || !duty || duty > 99)))
+		(!frequency || frequency > 20000000 || duty > 100)))
 		return -1;
 	body[3] = 0x10 + channel;
 	if (enabled) {

@@ -78,7 +78,7 @@ struct dev_context {
 	struct sr_sw_limits limits;
 	uint64_t samplerate;
 	uint64_t capture_ratio;
-	int threshold;
+	int16_t threshold;
 	gboolean stream, continuous, usb3, logic_only;
 	struct pwm_setting pwm[4];
 	struct dla_decoder decoder;
@@ -289,7 +289,6 @@ static const uint64_t samplerates[] = {
 	SR_MHZ(20), SR_MHZ(25), SR_MHZ(40), SR_MHZ(50), SR_MHZ(100),
 	SR_MHZ(125), SR_MHZ(200), SR_MHZ(250), SR_MHZ(500), SR_GHZ(1),
 };
-static const double thresholds[][2] = { {0.6, 0.6}, {1.6, 1.6}, {2.5, 2.5} };
 static const char *device_modes[] = { "Buffer", "Stream" };
 static const int32_t trigger_matches[] = {
 	SR_TRIGGER_ZERO, SR_TRIGGER_ONE, SR_TRIGGER_RISING,
@@ -430,7 +429,7 @@ static GSList *scan_wch(struct sr_dev_driver *di, GSList *options)
 		devc->wch.index = index;
 		devc->samplerate = SR_MHZ(50);
 		devc->capture_ratio = 50;
-		devc->threshold = 1;
+		devc->threshold = 160;
 		devc->logic_only = TRUE;
 		/* With multiple matching WCH nodes, the index-to-libusb association
 		 * needs a path match; never guess which node negotiated SuperSpeed. */
@@ -518,7 +517,7 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 		devc->limits.limit_samples = DEFAULT_LIMIT_SAMPLES;
 		devc->samplerate = SR_MHZ(50);
 		devc->capture_ratio = 50;
-		devc->threshold = 1;
+		devc->threshold = 160;
 		devc->usb3 = libusb_get_device_speed(list[i]) >= LIBUSB_SPEED_SUPER;
 		devc->logic_only = logic_only_profile();
 		for (ch = 0; ch < ARRAY_SIZE(devc->pwm); ch++) {
@@ -755,8 +754,8 @@ static int config_get(uint32_t key, GVariant **data,
 		*data = g_variant_new_string(sdi->connection_id);
 		break;
 	case SR_CONF_VOLTAGE_THRESHOLD:
-		*data = g_variant_new("(dd)", thresholds[devc->threshold][0],
-			thresholds[devc->threshold][1]);
+		*data = g_variant_new("(dd)", devc->threshold / 100.0,
+			devc->threshold / 100.0);
 		break;
 	case SR_CONF_DEVICE_MODE:
 	case SR_CONF_DATA_SOURCE:
@@ -780,7 +779,6 @@ static int config_set(uint32_t key, GVariant *data,
 	double low, high, number;
 	const char *mode;
 	int pwm_index, ret;
-	unsigned int i;
 	gboolean enabled;
 
 #if defined(_WIN32) && DLA_WCH_WORKER
@@ -814,7 +812,7 @@ static int config_set(uint32_t key, GVariant *data,
 			break;
 		case SR_CONF_DUTY_CYCLE:
 			number = g_variant_get_double(data);
-			if (!isfinite(number) || number < 1 || number > 99 ||
+			if (!isfinite(number) || number < 0 || number > 100 ||
 					number != (unsigned int)number)
 				return SR_ERR_ARG;
 			candidate.duty = number;
@@ -877,13 +875,8 @@ static int config_set(uint32_t key, GVariant *data,
 		return SR_OK;
 	case SR_CONF_VOLTAGE_THRESHOLD:
 		g_variant_get(data, "(dd)", &low, &high);
-		for (i = 0; i < ARRAY_SIZE(thresholds); i++) {
-			if (low == thresholds[i][0] && high == thresholds[i][1]) {
-				devc->threshold = i;
-				return SR_OK;
-			}
-		}
-		return SR_ERR_ARG;
+		return dla_threshold_from_volts(low, high, &devc->threshold) == 0 ?
+			SR_OK : SR_ERR_ARG;
 	case SR_CONF_DEVICE_MODE:
 	case SR_CONF_DATA_SOURCE:
 		mode = g_variant_get_string(data, NULL);
@@ -929,9 +922,10 @@ static int config_list(uint32_t key, GVariant **data,
 	uint64_t maximum, maximum_msec;
 	uint32_t mask;
 	unsigned int count;
-	int pwm_index;
+	int pwm_index, cv;
+	GVariantBuilder thresholds;
 	static const double frequency_range[] = {1, 20000000, 1};
-	static const double duty_range[] = {1, 99, 1};
+	static const double duty_range[] = {0, 100, 1};
 
 	if (cg) {
 		if (!sdi)
@@ -993,7 +987,12 @@ static int config_list(uint32_t key, GVariant **data,
 		*data = std_gvar_tuple_u64(1, 90);
 		return SR_OK;
 	case SR_CONF_VOLTAGE_THRESHOLD:
-		*data = std_gvar_thresholds(ARRAY_AND_SIZE(thresholds));
+		/* Derive each value from an integer. Accumulating a floating step
+		 * would make GET and LIST disagree in frontend range widgets. */
+		g_variant_builder_init(&thresholds, G_VARIANT_TYPE("a(dd)"));
+		for (cv = -500; cv <= 500; cv++)
+			g_variant_builder_add(&thresholds, "(dd)", cv / 100.0, cv / 100.0);
+		*data = g_variant_builder_end(&thresholds);
 		return SR_OK;
 	case SR_CONF_DEVICE_MODE:
 	case SR_CONF_DATA_SOURCE:
@@ -1422,9 +1421,11 @@ static void begin_ordered_stop(const struct sr_dev_inst *sdi)
 	}
 #endif
 	dla_stop(packet);
-	devc->stop_sent = TRUE;
-	if (send_command(sdi, packet) != SR_OK)
+	devc->stop_sent = send_command(sdi, packet) == SR_OK;
+	if (!devc->stop_sent) {
 		sr_err("Failed to send the acquisition stop command.");
+		capture_set_failure(devc, "error", "Capture incomplete: the USB stop command failed.");
+	}
 }
 
 static void rollback_acquisition(struct sr_dev_inst *sdi)
@@ -1684,8 +1685,11 @@ static int receive_events(int fd, int revents, void *cb_data)
 	}
 	check_data_progress(devc);
 	begin_ordered_stop(sdi);
-	if (devc->stopping && devc->stop_sent && !devc->submitted_transfers) {
-		drain_stopped_endpoint(sdi);
+	if (devc->stopping && devc->cancel_requested && !devc->submitted_transfers) {
+		/* A failed STOP still retires host resources and reports failure.
+		 * Do not drain an endpoint whose device-side stop is unconfirmed. */
+		if (devc->stop_sent)
+			drain_stopped_endpoint(sdi);
 		finish_acquisition(sdi);
 		return G_SOURCE_REMOVE;
 	}
@@ -1798,15 +1802,13 @@ static uint64_t samples_to_milliseconds(uint64_t samples,
 static void configure_setup(struct dla_setup_config *setup,
 	const struct dev_context *devc, uint64_t samples, gboolean has_trigger, uint32_t mask)
 {
-	static const uint16_t threshold_cv[] = {60, 160, 250};
-	static const uint8_t threshold_range[] = {7, 2, 1};
 	uint64_t milliseconds;
 
 	memset(setup, 0, sizeof(*setup));
 	setup->samplerate = devc->samplerate;
 	setup->samplerate_index = samplerate_index(devc->samplerate);
-	setup->threshold = threshold_cv[devc->threshold];
-	setup->threshold_range = threshold_range[devc->threshold];
+	setup->threshold = (uint16_t)devc->threshold;
+	setup->threshold_range = dla_threshold_preset(devc->threshold);
 	setup->interval_ms = 3;
 	setup->buffer = !devc->stream;
 	setup->mode = devc->continuous ? 3 : 0;
@@ -2034,8 +2036,8 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 			drain_empty, (unsigned int)DLA_PREARM_EMPTY_READS);
 
 	if (legacy_path)
-		dla_setup(packet, ((const uint16_t[]) { 60, 160, 250 })[devc->threshold],
-			((const uint8_t[]) { 7, 2, 1 })[devc->threshold], samples);
+		dla_setup(packet, (uint16_t)devc->threshold,
+			dla_threshold_preset(devc->threshold), samples);
 	else {
 		configure_setup(&setup, devc, samples, has_trigger, mask);
 		hardware_buffer_msec = !devc->stream && !has_trigger ? setup.duration_ms : 0;

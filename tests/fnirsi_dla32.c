@@ -51,7 +51,8 @@ static void golden_commands(void)
 	for (i=0;i<4;i++) { CHECK(dla_pwm(packet,i,1000,50,1)==0); CHECK(packet[12]==0x10+i); }
 	CHECK(dla_pwm(packet,4,1000,50,1)<0);
 	CHECK(dla_pwm(packet,0,0,50,1)<0); CHECK(dla_pwm(packet,0,20000001,50,1)<0);
-	CHECK(dla_pwm(packet,0,1000,0,1)<0); CHECK(dla_pwm(packet,0,1000,100,1)<0);
+	CHECK(dla_pwm(packet,0,1000,0,1)==0); CHECK(dla_pwm(packet,0,1000,100,1)==0);
+	CHECK(dla_pwm(packet,0,1000,101,1)<0);
 	trigger[31]=3; CHECK(dla_channels_config(packet,UINT32_C(0x80000001),trigger,0)==0);
 	CHECK(get32(packet+13)==UINT32_C(0x80000001)); CHECK(packet[48]==3);
 	CHECK(dla_channels_config(packet,0,trigger,0)<0);
@@ -114,21 +115,86 @@ START_TEST(test_protocol)
 }
 END_TEST
 
+START_TEST(test_threshold_encoding)
+{
+	const int16_t presets[] = {250, 160, 150, 120, 90, 70, 60};
+	const double invalid[] = {-5.01, 5.01, 0.005, NAN, INFINITY, -INFINITY};
+	struct dla_setup_config cfg = {0};
+	uint8_t packet[DLA_COMMAND_SIZE];
+	int16_t value;
+	int cv;
+	unsigned int i;
+
+	for (cv = -500; cv <= 500; cv++) {
+		value = 1234;
+		CHECK(dla_threshold_from_volts(cv / 100.0, cv / 100.0, &value) == 0);
+		CHECK(value == cv);
+		cfg.threshold = (uint16_t)value;
+		cfg.threshold_range = dla_threshold_preset(value);
+		dla_setup_configure(packet, &cfg);
+		CHECK(packet[22] == ((uint16_t)cv & 0xff));
+		CHECK(packet[23] == ((uint16_t)cv >> 8));
+	}
+	for (i = 0; i < ARRAY_SIZE(presets); i++)
+		CHECK(dla_threshold_preset(presets[i]) == i + 1);
+	CHECK(dla_threshold_preset(-500) == 0);
+	CHECK(dla_threshold_preset(0) == 0);
+	CHECK(dla_threshold_preset(500) == 0);
+	for (i = 0; i < ARRAY_SIZE(invalid); i++) {
+		value = 1234;
+		CHECK(dla_threshold_from_volts(invalid[i], invalid[i], &value) < 0);
+		CHECK(value == 1234);
+	}
+	CHECK(dla_threshold_from_volts(0.6, 1.6, &value) < 0);
+	CHECK(dla_threshold_from_volts(0, 0, NULL) < 0);
+	/* Independent signed custom vector: -5 V -> 0xfe0c, preset Custom. */
+	cfg.threshold = 0xfe0c;
+	cfg.threshold_range = 0;
+	dla_setup_configure(packet, &cfg);
+	CHECK(packet[22] == 0x0c && packet[23] == 0xfe && packet[24] == 0);
+}
+END_TEST
+
+START_TEST(test_pwm_dc_endpoints)
+{
+	uint8_t packet[DLA_COMMAND_SIZE];
+	unsigned int channel;
+
+	for (channel = 0; channel < 4; channel++) {
+		CHECK(dla_pwm(packet, channel, 1000000, 0, 1) == 0);
+		CHECK(packet[12] == 0x10 + channel);
+		CHECK(get32(packet + 13) == 1000000);
+		CHECK(get32(packet + 17) == 0);
+		CHECK(dla_pwm(packet, channel, 1000000, 100, 1) == 0);
+		CHECK(get32(packet + 17) == 100);
+	}
+	/* Golden CRCs from an independent zlib framing fixture. */
+	CHECK(dla_pwm(packet, 0, 1000000, 0, 1) == 0);
+	CHECK(get32(packet + 22) == 0x03c12ad1);
+	CHECK(dla_pwm(packet, 0, 1000000, 100, 1) == 0);
+	CHECK(get32(packet + 22) == 0xb7854a85);
+	CHECK(dla_pwm(packet, 0, 1000000, 101, 1) < 0);
+	CHECK(dla_pwm(packet, 0, 20000001, 50, 1) < 0);
+}
+END_TEST
+
 START_TEST(test_portable_controls)
 {
 	unsigned int i;
 	uint32_t writable = SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST;
-	gboolean ratio = FALSE, duration = FALSE, generator = FALSE;
+	gboolean ratio = FALSE, duration = FALSE, generator = FALSE, continuous = FALSE;
 
 	for (i = 0; i < ARRAY_SIZE(logic_drvopts); i++)
 		generator |= logic_drvopts[i] == SR_CONF_SIGNAL_GENERATOR;
 	for (i = 0; i < ARRAY_SIZE(logic_devopts); i++) {
 		ratio |= logic_devopts[i] == (SR_CONF_CAPTURE_RATIO | writable);
 		duration |= logic_devopts[i] == (SR_CONF_LIMIT_MSEC | writable);
+		continuous |= logic_devopts[i] == (SR_CONF_CONTINUOUS | SR_CONF_GET | SR_CONF_SET);
 	}
 	CHECK(generator);
 	CHECK(ratio);
 	CHECK(duration);
+	CHECK(continuous);
 }
 END_TEST
 
@@ -140,6 +206,8 @@ Suite *suite_fnirsi_dla32(void)
 	s = suite_create("fnirsi-dla32");
 	tc = tcase_create("protocol");
 	tcase_add_test(tc, test_protocol);
+	tcase_add_test(tc, test_threshold_encoding);
+	tcase_add_test(tc, test_pwm_dc_endpoints);
 	tcase_add_test(tc, test_portable_controls);
 	suite_add_tcase(s, tc);
 	return s;

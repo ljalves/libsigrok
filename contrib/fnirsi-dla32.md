@@ -1,7 +1,7 @@
 # FNIRSI DLA-32 Plus
 
 The `fnirsi-dla32` driver provides 32 physical logic inputs, Buffer and Stream
-acquisition, supported single-stage trigger conditions, threshold presets and
+acquisition, supported single-stage trigger conditions, adjustable threshold and
 four independent PWM output groups. Channel names/indices follow the physical
 inputs. Sparse-channel packing does not renumber enabled physical inputs.
 
@@ -33,9 +33,9 @@ without the discovery transaction. USB addresses can change after reconnection.
 Linux/libusb acquisition has not received the equivalent hardware qualification.
 An external tester has confirmed automatic discovery, a bounded Buffer transfer,
 clean binary export with the companion CLI fix and automatic rate refresh on
-Linux/USB 2. PWM and trigger-position operation were also reported after local
-capability changes; the portable capability follow-up still needs retesting on
-that system. These reports do not qualify high-rate integrity or long captures.
+Linux/USB 2. PWM, trigger-position and corrected CLI range display were also
+confirmed there. The later continuous-Stream follow-up still needs USB 3 Linux
+hardware testing. These reports do not qualify high-rate integrity or long captures.
 Acceptance of the Windows transport dependency is requested for
 maintainer review. This contribution does not establish vendor-independent
 transport support on all platforms.
@@ -53,7 +53,12 @@ Buffer sampling rates. Stream remains restricted to USB 3.
 Both transports publish four PWM groups without additional analog input
 channels. In PulseView, stop acquisition and open the **Channels** popup, then
 find the PWM0-PWM3 groups. Set output frequency and duty cycle before enabling
-the required output. Controls are 1 Hz-20 MHz and 1-99%; hardware duty/frequency
+the required output. Controls are 1 Hz-20 MHz and integer 0-100%. The endpoints
+command constant LOW/HIGH; disabling an output has separate, unmeasured
+electrical behavior. External measurements report 5 ns timing quantization,
+so a requested intermediate duty is not necessarily achievable: at 20 MHz,
+a 5 ns step is 10% of the period. Clocks above the rated 20 MHz have been
+reported experimentally but are not enabled by this driver. Frequency/duty
 accuracy remains subject to the recorded qualification scope. On Linux these
 commands use libusb directly and do not require the FNIRSI application.
 
@@ -70,8 +75,33 @@ signal span, not time spent waiting for a trigger or downloading the capture.
 The CLI can select a time-limited capture with `--time`; a `limit_time` readback
 of zero means that time limit is inactive when a sample-count limit is used.
 
-Continuous acquisition remains advertised only for the qualified WCH worker
-path. USB 2 continues to offer Buffer mode only.
+Both transports advertise continuous acquisition. Finite Stream ends at its
+sample/time limit; continuous Stream uses the device's rolling mode and runs
+until Stop. Both require USB 3. The libusb lifecycle has offline regression
+coverage, but equivalent continuous hardware qualification on Linux remains
+pending. USB 2 continues to offer Buffer mode only.
+
+PulseView Stop preserves data already delivered to the application and retires
+active transfers. It does not offer the vendor application's separate Buffer
+choice to stop early and upload the device's partially filled memory. Failed
+libusb STOP writes report an error and close the host acquisition after transfer
+callbacks retire; device-side stopping is not claimed. Reopen/recover the device
+before retrying if such an error occurs.
+
+## Input threshold
+
+The standard voltage-threshold key accepts one shared switching level from
+-5 V to +5 V in 0.01 V command steps. Its low/high pair must contain equal
+values: it does not configure a hysteresis band. PulseView presents the regular
+list as a slider, including zero and negative voltages. The former 0.6/1.6/2.5 V
+values remain available. All seven factory preset voltages select their
+corresponding preset code; other values use Custom. The setup field is signed
+16-bit little-endian hundredths of a volt, so -5 V is 0xfe0c, not -50.
+
+These are protocol settings, not calibrated electrical threshold or hysteresis
+specifications. Selecting a threshold with more signal margin can help examine
+extra crossings, but the setting alone does not establish the cause of short
+pulses. No filtering, debounce or waveform correction is applied.
 
 The optional `FNIRSI_DLA32_WIRE_TRACE` absolute destination is a diagnostic raw
 USB trace. An explicitly requested trace is created exclusively; trace-write

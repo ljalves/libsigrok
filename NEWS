@@ -3,11 +3,14 @@
 
  * New supported hardware:
    - FNIRSI DLA-32 Plus logic analyzer, with Buffer/Stream acquisition,
-     supported basic triggers, threshold presets and four PWM outputs.
+     supported basic triggers, signed adjustable threshold and four PWM outputs.
      Windows x64/WCH transport is qualified; Linux/libusb requires validation.
  * Session metadata:
    - Proposed host capture outcome/error keys and saved-session replay.
  * Fixes:
+   - Support DLA-32 thresholds from -5 V to +5 V in 10 mV command steps.
+   - Support constant LOW/HIGH PWM endpoints and portable continuous Stream.
+   - Report failed libusb STOP commands and retire host resources without hanging.
    - Expose DLA-32 PWM groups and finite trigger/duration controls on libusb.
    - Confirm DLA-32 identity during automatic libusb discovery and add its udev entry.
    - Retire pending stop checks after failed session start.
