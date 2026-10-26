@@ -2119,11 +2119,22 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 		devc->transfer_submitted[i] = TRUE;
 		devc->submitted_transfers++;
 	}
+	/* Advanced trigger - only available in buffer mode */
+	if (setup.trigger_mode == 2 && setup.mode == 0 && setup.buffer) {
+		dla_setup_adv_trigger(packet, &setup);
+		ret = send_command(sdi, packet);
+		if (ret != SR_OK) {
+			sr_err("Failed to setup advanced trigger: %s.", sr_strerror(ret));
+			rollback_acquisition((struct sr_dev_inst *)sdi);
+			return ret;
+		}
+	}
 	if (legacy_path) {
 		dla_channels(packet);
 		ret = send_command(sdi, packet);
 	} else {
-		ret = dla_channels_config(packet, mask, conditions, 0) < 0 ?
+		ret = dla_channels_config(packet, mask, conditions,
+			setup.trigger_mode == 0 ? 1 : 0) < 0 ?
 			SR_ERR_ARG : send_command(sdi, packet);
 	}
 	if (ret != SR_OK) {

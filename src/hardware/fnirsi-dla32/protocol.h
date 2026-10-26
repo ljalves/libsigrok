@@ -75,7 +75,77 @@ struct dla_setup_config {
 	uint16_t threshold, duration_ms, interval_ms;
 	uint8_t samplerate_index, threshold_range, duration_index;
 	uint8_t buffer, mode, rle;
+
+	/* Trigger modes:
+		0 = Instant mode (no trigger)
+		1 = Standard trigger
+		2 = Advanced trigger
+	*/
+	uint8_t trigger_mode;
+
+	// adv trigger config
+	uint8_t adv_trigger_mode; // 0 = parallel, 1 = serial
+	uint8_t adv_trigger_ser_clk_edge; // 0 = rising edge, 1 = falling edge
+	uint8_t adv_trigger_ser_format; // Format in the GUI! (0 = dec, 1 = hex)
+	uint8_t adv_trigger_ser_clk_ch; // ch 0~31
+	uint8_t adv_trigger_ser_dat_ch; // ch 0~31
+	uint8_t adv_trigger_ser_bit_width; // 0~15 corresponding to 1~16 bits
+	uint16_t adv_trigger_ser_value; // Serial trigger match value
+
+	uint8_t adv_trigger_par_levels; // Total trigger levels 1~16
+	uint8_t adv_trigger_par_continuous[16]; // Continuous mode per levels
+	uint8_t adv_trigger_par_count[16]; // Count for each of the 16 levels
+	/* Trigger per level and channel. Accepted values:
+	   0=Low, 1=High, 2=Disabled, 3=Rising edge, 4=Falling edge, 5=Any edge */
+	uint8_t adv_trigger_par_ch[16][DLA_CHANNELS];
 };
+
+static inline void dla_setup_adv_trigger(uint8_t *out,
+	const struct dla_setup_config *cfg)
+{
+	uint8_t body[304] = {0x13, 0x2f, 0x01};
+	unsigned int lvl, ch;
+
+	body[3] = cfg->adv_trigger_mode;
+	body[4] = cfg->adv_trigger_ser_clk_edge;
+	//body[5] = cfg->adv_trigger_ser_format; // Useless...
+	body[6] = cfg->adv_trigger_ser_clk_ch;
+	body[7] = cfg->adv_trigger_ser_dat_ch;
+	body[8] = cfg->adv_trigger_ser_bit_width;
+	body[9] = cfg->adv_trigger_par_levels;
+	dla_put16(body + 10, cfg->adv_trigger_ser_value);
+	for (lvl = 0; lvl < 16; lvl++) {
+		body[0x10 + lvl] = cfg->adv_trigger_par_continuous[lvl];
+		body[0x20 + lvl] = cfg->adv_trigger_par_count[lvl];
+
+		/* trigger setup:
+		0=Low, 1=High, 2=Disabled, 3=Rising edge, 4=Falling edge, 5=Any edge
+			1 nibble per ch, ch31 first
+			example:
+
+				level 1 (base offset 0x30)
+			 	      rising edge in ch0
+					  			    /
+				high level in ch1  /
+				               |  /
+							   | /
+							   VV
+				body[0x3f] = 0x13
+
+				falling edge in ch31
+							   |
+							   V
+				body[0x30] = 0x40
+		*/
+
+		for (ch = 0; ch < (DLA_CHANNELS / 2); ch++) {
+			body[0x30 + (ch + (lvl * 0x10))] =
+				((cfg->adv_trigger_par_ch[lvl][31 - (ch * 2)] << 4) & 0xf0) |
+				((cfg->adv_trigger_par_ch[lvl][31 - (ch * 2 + 1)]) & 0x0f);
+		}
+	}
+	dla_packet(out, body, sizeof(body));
+}
 
 static inline void dla_setup_configure(uint8_t *out,
 	const struct dla_setup_config *cfg)
