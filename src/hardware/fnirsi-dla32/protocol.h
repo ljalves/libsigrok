@@ -72,7 +72,7 @@ static inline void dla_packet(uint8_t *out, const uint8_t *body, size_t len)
 struct dla_setup_config {
 	uint32_t samplerate, trigger_position;
 	uint64_t samples;
-	uint16_t threshold, duration_ms, interval_ms;
+	uint16_t threshold, duration_ms;
 	uint8_t samplerate_index, threshold_range, duration_index;
 	uint8_t buffer, mode, rle;
 };
@@ -146,17 +146,17 @@ static inline void dla_setup_configure(uint8_t *out,
 {
 	uint8_t body[31] = {0x11, 0x1e, 0x00};
 
-	body[3] = cfg->rle;
-	body[4] = cfg->buffer;
-	body[5] = cfg->mode;
-	dla_put16(body + 6, cfg->interval_ms);
+	body[3] = cfg->rle; /* can't find this setting in vendor app (always 0) */
+	body[4] = cfg->buffer; /* vendor app mode: buffer = 0, stream = 1 */
+	body[5] = cfg->mode; /* vendor app, buffer mode only: stop now = 0, stop upload = 1 (???) */
+	dla_put16(body + 6, 1); /* dummy value: vendor app loop mode interval (s) */
 	dla_put32(body + 8, cfg->samplerate);
 	body[12] = cfg->samplerate_index;
 	dla_put16(body + 13, cfg->threshold);
 	body[15] = cfg->threshold_range;
 	dla_put16(body + 16, cfg->duration_ms);
 	body[18] = cfg->duration_index;
-	dla_put32(body + 19, cfg->trigger_position);
+	dla_put32(body + 19, cfg->trigger_position); /* in 0.1% steps */
 	dla_put64(body + 23, cfg->samples);
 	dla_packet(out, body, sizeof(body));
 }
@@ -238,40 +238,6 @@ static inline int dla_channels_config(uint8_t *out, uint32_t mask,
 	}
 	dla_packet(out, body, sizeof(body));
 	return 0;
-}
-
-/* 50 MHz / 1, 2, 5 or 10 ms / buffer mode, captured by the DLA-32 reference.
- * Threshold is the comparator voltage in centivolts, not the logic rail.
- */
-static inline void dla_setup(uint8_t *out, uint16_t threshold, uint8_t range,
-	uint32_t requested_samples)
-{
-	uint8_t body[] = {
-		0x11, 0x1e, 0x00, 0x00, 0x01, 0x00, 0x03, 0x00,
-		0x80, 0xf0, 0xfa, 0x02, 0x08, 0xa0, 0x00, 0x02,
-		0x01, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
-		0x50, 0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	};
-	const uint32_t limits[] = {50000, 100000, 250000, 500000};
-	const uint8_t duration_ms[] = {1, 2, 5, 10};
-	unsigned int profile = 0;
-
-	while (profile < 3 && requested_samples > limits[profile])
-		profile++;
-	body[13] = threshold;
-	body[14] = threshold >> 8;
-	body[15] = range;
-	body[16] = duration_ms[profile];
-	body[18] = profile;
-	dla_put32(body + 23, limits[profile]);
-	dla_packet(out, body, sizeof(body));
-}
-
-static inline void dla_channels(uint8_t *out)
-{
-	uint8_t body[40] = { 0x12, 0x27, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff };
-
-	dla_packet(out, body, sizeof(body));
 }
 
 static inline void dla_stop(uint8_t *out)
